@@ -141,7 +141,8 @@ final class ProfileStore: ObservableObject {
     }
 
     func refreshRunning() {
-        guard let out = try? runTool("/bin/ps", ["-axo", "command"]) else { return }
+        // -x without -a: this user's processes only, same as cdp's own check.
+        guard let out = try? runTool("/bin/ps", ["-xo", "command"]) else { return }
         var found = Set<String>()
         for lineSub in out.split(separator: "\n") {
             let line = String(lineSub)
@@ -154,7 +155,13 @@ final class ProfileStore: ObservableObject {
             if let r = line.range(of: "--user-data-dir=") {
                 let rest = String(line[r.upperBound...])
                 for p in profiles {
-                    if let d = p.dataDir, rest.hasPrefix(d) { found.insert(p.id) }
+                    // This exact folder, not a longer one sharing the prefix
+                    // ("Work" vs "Work Two"): the argument ends there or
+                    // another flag follows. Mirrors instance_pid in bin/cdp.
+                    if let d = p.dataDir, rest.hasPrefix(d) {
+                        let tail = rest.dropFirst(d.count)
+                        if tail.isEmpty || tail.hasPrefix(" -") { found.insert(p.id) }
+                    }
                 }
             } else if line.contains("Claude.app/Contents/MacOS/Claude") {
                 found.insert("Default")

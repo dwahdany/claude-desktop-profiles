@@ -59,6 +59,10 @@ check "download is quarantined" quarantined "$installed/$HELPER_REL"
 check "setup succeeds" setup --if-needed
 check "setup records version and location" grep -qxF "$version $installed/Contents/Resources/cdp" "$sandbox/Library/Caches/claude-desktop-profiles/setup"
 check "cached helper is not quarantined" not_quarantined "$cached"
+# Byte-identical, so not re-signed: the copy that runs keeps the signature the
+# app was built with.
+check "cached helper is the shipped helper" cmp "$installed/$HELPER_REL" "$cached/Contents/MacOS/Claude Profiles Helper"
+check "cached helper signature verifies" codesign --verify "$cached"
 check "cached helper runs" helper_runs "$cached/Contents/MacOS/Claude Profiles Helper"
 check "launcher rebuilt as an applet" test -x "$launcher/Contents/MacOS/applet"
 check "launcher bundles this cdp" cmp bin/cdp "$launcher/Contents/Resources/cdp"

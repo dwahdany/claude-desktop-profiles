@@ -125,8 +125,10 @@ macOS experience.
   `codesign --verify` still passes and Keychain keeps releasing "Claude
   Safe Storage" — logins survive. Clones live outside Spotlight's index
   (`~/Library/Application Support/claude-desktop-profiles/apps`) so they
-  can't be launched without their `--user-data-dir`. The clone is exec'd
-  directly (not via `open`) with a scrubbed, launchd-like environment plus
+  can't be launched without their `--user-data-dir`. The clone is started
+  through `open`, which itself runs with a scrubbed, launchd-like environment
+  (`open` passes its own environment on to the app, so a profile started from
+  a terminal would otherwise inherit that shell's variables), plus
   `CLAUDE_CONFIG_DIR=<profile>/claude-config`: `--user-data-dir` scopes only
   Electron's userData, while the Claude Code that Desktop embeds (Code /
   Cowork tab) otherwise shares `~/.claude`, `~/.claude.json` and the CLI's
@@ -230,6 +232,31 @@ scripts/test.sh    # builds, checks the bundle, then runs the first-launch setup
 ```
 
 The tests never touch your real `~/Applications`, profiles or watchdog.
+
+### Signed and notarized builds
+
+`scripts/build.sh` signs ad hoc by default. For a build you can distribute,
+set these in the environment:
+
+```sh
+CDP_SIGN_IDENTITY="Developer ID Application: Example Org (TEAMID1234)" \
+CDP_NOTARY_PROFILE="my-notary-profile" \
+scripts/build.sh
+```
+
+- `CDP_SIGN_IDENTITY`: a signing identity in the build Mac's keychain. The app
+  and its helper are signed with it, with the hardened runtime and a secure
+  timestamp.
+- `CDP_NOTARY_PROFILE`: a keychain profile created with
+  `xcrun notarytool store-credentials`. The zip is notarized, the ticket is
+  stapled to the app, and the zip is made again from the stapled app.
+
+Give every build you ship its own `CDP_VERSION` (top of `bin/cdp`): the first
+launch of a new version is what moves the launchers, the watchdog and the
+helper over to it, and an unchanged version skips that step.
+
+The launchers are compiled on each user's Mac and stay ad hoc signed whatever
+the app is signed with.
 
 ## Acknowledgments
 

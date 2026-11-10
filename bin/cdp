@@ -25,7 +25,11 @@ set -euo pipefail
 # (FUNCTION_ARGZERO), which would break the self-copy into the chooser bundle.
 SCRIPT_PATH="${0:A}"
 
-CDP_VERSION="0.4.3"
+# Every build that ships needs its own version string. cmd_setup skips its work
+# when "<version> <script path>" matches the stamp of the last setup, so a
+# different build under an unchanged version would leave the launchers, the
+# watchdog and the cached helper on the previous build's code.
+CDP_VERSION="0.4.3.1"
 
 APP_SUPPORT="$HOME/Library/Application Support"
 LAUNCHER_DIR="$HOME/Applications"
@@ -71,14 +75,32 @@ find_claude_app() {
 }
 
 # "client acme" -> slug "client-acme", display "Client Acme"
+# The slug is only ever [a-z0-9-]: -r keeps print from decoding backslash
+# escapes in the name, and line breaks are folded in before sed, which would
+# otherwise clean each line separately and leave them in.
 slugify() {
-  print -- "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
+  print -r -- "$1" | tr '[:upper:]' '[:lower:]' | tr '\n' '-' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'
 }
 
 displayify() {
   local out=() part
   for part in ${(s:-:)1}; do out+=("${(C)part}"); done
   print -- "${(j: :)out}"
+}
+
+# Resolves a name, typed or picked from a list, to the display name of the
+# profile cdp acts on. The GUI and the chooser list every Claude-* folder as
+# found on disk, and normalising such a name can land on a DIFFERENT folder
+# ("Work_Old" -> "Work Old"). Refuse, rather than launch, recolor or delete a
+# profile other than the one that was picked.
+profile_display() {
+  local raw="$1" display
+  display=$(displayify "$(slugify "$raw")")
+  [[ -n "$display" ]] || err "Name must contain at least one letter or digit."
+  if [[ -d "$APP_SUPPORT/Claude-$raw" && ! "$APP_SUPPORT/Claude-$raw" -ef "$APP_SUPPORT/Claude-$display" ]]; then
+    err "'$raw' is not a profile cdp created: its folder is not named the way cdp names profiles, and the name resolves to the profile '$display' instead. Nothing was changed. Folder: $APP_SUPPORT/Claude-$raw"
+  fi
+  print -r -- "$display"
 }
 
 # The manager app ("Claude Profiles"): the downloaded release in
@@ -142,10 +164,13 @@ ensure_tint_tool() {
     ditto "$prebuilt" "$bundle"
     xattr -dr com.apple.quarantine "$bundle" 2>/dev/null || true
     touch "$tool"
+    # No helper_icon here: the shipped helper already carries its icon, and
+    # helper_icon re-signs ad hoc, which would replace the signature the
+    # release was built with on the copy that actually runs.
   else
     build_helper "$bundle" 2>/dev/null || return 1
+    helper_icon "$tool" "$icns"
   fi
-  helper_icon "$tool" "$icns"
   print -- "$tool"
 }
 
@@ -356,8 +381,23 @@ has_custom_icon() {
 # or clone), empty when not running. The trailing `|| true` matters: under
 # `set -euo pipefail` a no-match grep (exit 1) would otherwise kill the
 # whole script at the call site's assignment.
+#
+# Only this user's processes (no -a), and only this exact folder: the
+# argument must end there or be followed by another flag. A bare substring
+# match also hit a longer folder sharing the prefix, so launching "Work"
+# while "Work Two" ran focused the other account's window.
 instance_pid() {
-  ps -axo pid=,command= 2>/dev/null | grep -F -- "--user-data-dir=$1" | grep -F "/Contents/MacOS/Claude" | grep -v Helper | grep -v grep | awk '{print $1}' | head -1 || true
+  local line pid rest arg="--user-data-dir=$1"
+  ps -xo pid=,command= 2>/dev/null | grep -F -- "$arg" | grep -F "/Contents/MacOS/Claude" | grep -v Helper | grep -v grep | while IFS= read -r line; do
+    rest="${line#*"$arg"}"
+    rest="${rest%"${rest##*[![:space:]]}"}"
+    [[ -z "$rest" || "$rest" == " -"* ]] || continue
+    line="${line#"${line%%[![:space:]]*}"}"
+    pid="${line%%[[:space:]]*}"
+    [[ "$pid" == <-> ]] || continue
+    print -r -- "$pid"
+    break
+  done || true
 }
 
 # Claude Code's config dir for this profile. --user-data-dir only scopes
@@ -376,9 +416,15 @@ config_dir_of_profile() {
 # child exec'd from the launcher applet's `do shell script` became the
 # applet's LaunchServices subordinate, so the dead applet kept a second,
 # differently tinted Dock tile ("exited-with-subordinates") for as long as
-# the clone ran. `open` gives the app launchd's env, so nothing from the
-# calling shell leaks in; CLAUDE_CONFIG_DIR goes in via --env. -n so a stray
-# of the same bundle (no --user-data-dir) is never just re-activated.
+# the clone ran. CLAUDE_CONFIG_DIR goes in via --env. -n so a stray of the
+# same bundle (no --user-data-dir) is never just re-activated.
+#
+# `open` hands its OWN environment on to the app it launches (open(1):
+# "Opened applications inherit environment variables just as if you had
+# launched the application directly through its full path"), so a profile
+# started from a terminal would get that shell's API keys, proxies and
+# config overrides. `open` therefore runs under `env -i` with the same
+# launchd-like set the direct exec used before it.
 launch_clone() {
   local clone="$1" data_dir="$2" cfg
   cfg=$(config_dir_of_profile "$data_dir")
@@ -388,7 +434,12 @@ launch_clone() {
   [[ -n "$data_dir" && -n "$cfg" ]] || err "Refusing to launch: empty data or config dir."
   [[ -x "$clone/Contents/MacOS/Claude" ]] || err "Refusing to launch: clone binary missing at $clone."
   mkdir -p "$cfg"
-  /usr/bin/open -n -a "$clone" --env CLAUDE_CONFIG_DIR="$cfg" \
+  /usr/bin/env -i \
+    HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL="${SHELL:-/bin/zsh}" \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    TMPDIR="$(getconf DARWIN_USER_TEMP_DIR)" LANG="${LANG:-en_US.UTF-8}" \
+    ${SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$SSH_AUTH_SOCK"} \
+    /usr/bin/open -n -a "$clone" --env CLAUDE_CONFIG_DIR="$cfg" \
     --args --user-data-dir="$data_dir"
 }
 
@@ -398,13 +449,30 @@ launch_clone() {
 # comes up on the DEFAULT userData: default account, orange Dock icon, but
 # still titled "Claude <Profile>". Args are the only thing `ps` lets us
 # check (hardened runtime hides env), and both are dropped together.
+#
+# What comes out of here is handed to `kill`, so a line only counts when it
+# is one of this user's processes (no -a), its pid column is a plain number,
+# and its command IS a clone's main binary rather than merely mentioning
+# one. Command lines are written by the processes themselves: the pid is
+# never taken from that text, and -r keeps print from turning a backslash
+# sequence in it into an extra record.
 stray_pids() {
-  local line pid cmd rest display
-  ps -axo pid=,command= 2>/dev/null | grep -F -- "$CLONES_DIR/" | grep -F "/Contents/MacOS/Claude" | grep -v Helper | grep -v grep | grep -vF -- "--user-data-dir=" | while IFS= read -r line; do
-    pid="${line##[[:space:]]#}"; pid="${pid%% *}"
-    cmd="${line#*"$CLONES_DIR/"}"
-    display="${${cmd%%.app/Contents/MacOS/Claude*}#Claude }"
-    [[ -n "$display" ]] && print -- "$pid"$'\t'"$display"
+  local line pid cmd display exe
+  ps -xo pid=,command= 2>/dev/null | grep -F -- "$CLONES_DIR/Claude " | grep -vF -- "--user-data-dir=" | while IFS= read -r line; do
+    # ps right-aligns the pid column: drop the padding, then split.
+    line="${line#"${line%%[![:space:]]*}"}"
+    pid="${line%%[[:space:]]*}"
+    [[ "$pid" == <-> ]] || continue
+    cmd="${line#"$pid"}"
+    cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+    [[ "$cmd" == "$CLONES_DIR/Claude "* ]] || continue
+    display="${cmd#"$CLONES_DIR/Claude "}"
+    display="${display%%.app/Contents/MacOS/Claude*}"
+    # A slash means the binary sits deeper in the bundle: a helper process.
+    [[ -n "$display" && "$display" != */* ]] || continue
+    exe="$CLONES_DIR/Claude $display.app/Contents/MacOS/Claude"
+    [[ "$cmd" == "$exe" || "$cmd" == "$exe "* ]] || continue
+    print -r -- "$pid"$'\t'"$display"
   done || true
 }
 
@@ -413,6 +481,9 @@ stray_pids() {
 adopt_strays() {
   local entry pid display i
   stray_pids | while IFS=$'\t' read -r pid display; do
+    # One ordinary process only: 0 and negative ids address whole process
+    # groups, and -1 every process this user owns.
+    [[ "$pid" == <-> ]] && (( pid > 1 )) || continue
     info "Clone '$display' is running without its profile (post-update relaunch?) — re-homing."
     kill -TERM "$pid" 2>/dev/null || continue
     for i in {1..30}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
@@ -577,10 +648,19 @@ bundle_cdp() {
 # an old copy behind. Launchers whose profile has no launcher (removed with
 # --keep-data) stay removed.
 sync_install() {
-  local claude_app d display
+  local claude_app d display m
   claude_app=$(find_claude_app)
+  # This version takes over: a helper cached by an earlier install would
+  # otherwise stay in use for as long as its file is newer than this script.
+  # Only when the manager app ships one to replace it with.
+  m=$(manager_app) && [[ -x "$m/Contents/Resources/$HELPER_NAME.app/Contents/MacOS/$HELPER_NAME" ]] &&
+    rm -rf "$CACHE_DIR/$HELPER_NAME.app"
   for d in "$APP_SUPPORT"/Claude-*(N/); do
     display="${${d:t}#Claude-}"
+    # Only folders named the way cdp names profiles. The name is written
+    # into the launcher's AppleScript source, and a Claude-* folder made by
+    # anything else can carry quotes or line breaks.
+    [[ "$display" == "$(displayify "$(slugify "$display")")" ]] || continue
     [[ -d "$LAUNCHER_DIR/Claude $display.app" ]] || continue
     build_launcher "$(slugify "$display")" "$display" "$(color_of_profile "$d")" "$claude_app"
   done
@@ -749,7 +829,7 @@ EOF
 launch_profile() {
   local raw="$1"
   local display data_dir color clone claude_app pid tool
-  display=$(displayify "$(slugify "$raw")")
+  display=$(profile_display "$raw") || return 1
   data_dir="$APP_SUPPORT/Claude-$display"
   [[ -d "$data_dir" ]] || err "Profile '$display' not found. Create it with: cdp add $raw"
   color=$(color_of_profile "$data_dir")
@@ -871,7 +951,7 @@ cmd_color() {
   [[ -n "$raw" && -n "$color" ]] || err "Usage: cdp color <name> <color>   Available: ${(k)HUES}"
   [[ -n "${HUES[$color]+x}" ]] || err "Unknown color '$color'. Available: ${(k)HUES}"
   local display data_dir app_path claude_app
-  display=$(displayify "$(slugify "$raw")")
+  display=$(profile_display "$raw") || exit 1
   data_dir="$APP_SUPPORT/Claude-$display"
   app_path="$LAUNCHER_DIR/Claude $display.app"
   [[ -d "$data_dir" ]] || err "Profile '$display' not found."
@@ -938,9 +1018,19 @@ EOF
   bundle_cdp "$bundle"
   cp "${SCRIPT_PATH:h:h}/app/AppIcon.icns" "$bundle/Contents/Resources/AppIcon.icns"
   cp "${SCRIPT_PATH:h:h}/app/AppIcon.icns" "$bundle/Contents/Resources/$HELPER_NAME.app/Contents/Resources/AppIcon.icns"
-  /usr/bin/codesign --force --sign - "$bundle/Contents/Resources/$HELPER_NAME.app"
 
-  /usr/bin/codesign --force --sign - "$bundle"
+  # Ad hoc unless CDP_SIGN_IDENTITY names a signing identity in this Mac's
+  # keychain (a release build: "Developer ID Application: …"). It is read
+  # from the environment at build time and never written into the script,
+  # which ships inside the app and also runs on Macs that do not have the
+  # key. A real identity gets the hardened runtime and a secure timestamp,
+  # both of which notarization requires. Helper first, then the app that
+  # seals it.
+  local -a sign=(--force --sign "${CDP_SIGN_IDENTITY:--}")
+  [[ "${CDP_SIGN_IDENTITY:--}" == "-" ]] || sign+=(--options runtime --timestamp)
+  /usr/bin/codesign $sign "$bundle/Contents/Resources/$HELPER_NAME.app"
+
+  /usr/bin/codesign $sign "$bundle"
 }
 
 cmd_gui() {
@@ -999,7 +1089,7 @@ cmd_remove() {
   local raw="${1:-}" mode="${2:-}"
   [[ -n "$raw" ]] || err "Usage: cdp remove <name> [--keep-data|--delete-data]"
   local display data_dir app_path
-  display=$(displayify "$(slugify "$raw")")
+  display=$(profile_display "$raw") || exit 1
   data_dir="$APP_SUPPORT/Claude-$display"
   app_path="$LAUNCHER_DIR/Claude $display.app"
 
