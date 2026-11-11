@@ -1,11 +1,62 @@
 #!/bin/sh
-# Builds the release: build/Claude Profiles.app (universal, ad-hoc signed) and
+# Builds the release: build/Claude Profiles.app (universal) and
 # build/Claude-Profiles.zip, the asset attached to the GitHub release.
+#
+# Signing is ad hoc unless these are set in the environment:
+#   CDP_SIGN_IDENTITY   a signing identity in this Mac's keychain, e.g.
+#                       "Developer ID Application: Example Org (TEAMID1234)".
+#                       The app and its helper are then signed with it, with
+#                       the hardened runtime and a secure timestamp.
+#   CDP_NOTARY_PROFILE  a notarytool keychain profile
+#                       (xcrun notarytool store-credentials <name> ...).
+#                       The app is then notarized and the ticket stapled to
+#                       it before the zip is made.
+#
+# The zip exists only after a run that finished: a run that is refused, a
+# build that fails or one the notary service does not accept leaves nothing
+# at that path, not even the zip of an earlier run.
 set -eu
 cd "$(dirname "$0")/.."
 
 APP="build/Claude Profiles.app"
+ZIP="build/Claude-Profiles.zip"
+# Working files. The release zip is written under another name and moved
+# into place as the last step, so a run cut short leaves no partial one.
+SUBMISSION="build/notary-submission.zip"
+PARTIAL="$ZIP.partial"
+
+rm -f "$ZIP" "$SUBMISSION" "$PARTIAL"
+trap 'rm -f "$SUBMISSION" "$PARTIAL"' EXIT
+
+# bin/cdp reads an empty identity and "-" as ad hoc; so does this script.
+IDENTITY="${CDP_SIGN_IDENTITY:-}"
+[ "$IDENTITY" != "-" ] || IDENTITY=""
+PROFILE="${CDP_NOTARY_PROFILE:-}"
+
+if [ -n "$PROFILE" ] && [ -z "$IDENTITY" ]; then
+    echo "CDP_NOTARY_PROFILE needs CDP_SIGN_IDENTITY: an ad hoc build cannot be notarized." >&2
+    exit 1
+fi
+
 CDP_ARCHS="arm64 x86_64" bin/cdp build "$APP"
-rm -f build/Claude-Profiles.zip
-ditto -c -k --keepParent "$APP" build/Claude-Profiles.zip
-echo "Built $APP and build/Claude-Profiles.zip ($(bin/cdp version))"
+
+if [ -n "$PROFILE" ]; then
+    ditto -c -k --keepParent "$APP" "$SUBMISSION"
+    xcrun notarytool submit "$SUBMISSION" --keychain-profile "$PROFILE" --wait
+    # The gate: there is a ticket to staple only when the submission was
+    # accepted, whatever notarytool's own exit status was.
+    xcrun stapler staple "$APP" || {
+        echo "Could not staple a notarization ticket to $APP: the submission above was not accepted, or the ticket could not be fetched." >&2
+        echo "Details: xcrun notarytool log <submission id> --keychain-profile \"$PROFILE\"" >&2
+        exit 1
+    }
+    SIGNED="signed by $IDENTITY, notarized"
+elif [ -n "$IDENTITY" ]; then
+    SIGNED="signed by $IDENTITY, not notarized"
+else
+    SIGNED="ad hoc signed"
+fi
+
+ditto -c -k --keepParent "$APP" "$PARTIAL"
+mv "$PARTIAL" "$ZIP"
+echo "Built $APP and $ZIP ($(bin/cdp version), $SIGNED)"

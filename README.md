@@ -28,7 +28,10 @@ password or Touch ID.
 
 <img src="docs/images/open-anyway-confirm.png" width="300" alt="macOS dialog: Open “Claude Profiles”? with the Open Anyway button">
 
-You do this once per version; from then on it opens like any other app.
+You do this once per version; from then on it opens like any other app. A
+build that was signed and notarized (see
+[Signed and notarized builds](#signed-and-notarized-builds)) opens without
+this step.
 
 > **Prefer the Terminal?** This does the same as step 3:
 > ```sh
@@ -99,7 +102,7 @@ The window, the launchers and the CLI all run the same `cdp` script.
 
 ## Data and privacy
 
-- No telemetry, no network calls. About 1,700 lines of shell and Swift you can
+- No telemetry, no network calls. About 1,800 lines of shell and Swift you can
   read in one sitting.
 - A profile is a folder: `~/Library/Application Support/Claude-<Name>`. Its
   Claude Code config lives in `<profile>/claude-config`.
@@ -125,8 +128,10 @@ macOS experience.
   `codesign --verify` still passes and Keychain keeps releasing "Claude
   Safe Storage" — logins survive. Clones live outside Spotlight's index
   (`~/Library/Application Support/claude-desktop-profiles/apps`) so they
-  can't be launched without their `--user-data-dir`. The clone is exec'd
-  directly (not via `open`) with a scrubbed, launchd-like environment plus
+  can't be launched without their `--user-data-dir`. The clone is started
+  through `open`, which itself runs with a scrubbed, launchd-like environment
+  (`open` passes its own environment on to the app, so a profile started from
+  a terminal would otherwise inherit that shell's variables), plus
   `CLAUDE_CONFIG_DIR=<profile>/claude-config`: `--user-data-dir` scopes only
   Electron's userData, while the Claude Code that Desktop embeds (Code /
   Cowork tab) otherwise shares `~/.claude`, `~/.claude.json` and the CLI's
@@ -224,12 +229,56 @@ AppleScript picker without a Swift toolchain) and links `cdp` onto your PATH.
 ## Tests
 
 ```sh
-scripts/build.sh   # build/Claude Profiles.app and build/Claude-Profiles.zip (universal)
-scripts/test.sh    # builds, checks the bundle, then runs the first-launch setup
-                   # of a quarantined copy in a throwaway HOME
+scripts/build.sh           # build/Claude Profiles.app and build/Claude-Profiles.zip (universal)
+scripts/test.sh            # builds, checks the bundle, then runs the first-launch setup
+                           # of a quarantined copy in a throwaway HOME
+zsh scripts/test-unit.zsh  # the name, process-matching and signing logic alone;
+                           # needs no Mac, and scripts/test.sh runs it too
 ```
 
 The tests never touch your real `~/Applications`, profiles or watchdog.
+
+### Signed and notarized builds
+
+`scripts/build.sh` signs ad hoc by default. For a build you can distribute,
+set these in the environment:
+
+```sh
+CDP_SIGN_IDENTITY="Developer ID Application: Example Org (TEAMID1234)" \
+CDP_NOTARY_PROFILE="my-notary-profile" \
+scripts/build.sh
+```
+
+- `CDP_SIGN_IDENTITY`: a signing identity in the build Mac's keychain. The app
+  and its helper are signed with it, with the hardened runtime and a secure
+  timestamp.
+- `CDP_NOTARY_PROFILE`: a keychain profile created with
+  `xcrun notarytool store-credentials`. The app is notarized and the ticket
+  stapled to it before the zip is made. It needs `CDP_SIGN_IDENTITY`.
+
+With `CDP_SIGN_IDENTITY` alone the build is signed and not notarized. The last
+line of the build's output says which of the three it was. If the build is
+refused or fails, or the notary service does not accept it, no zip is left in
+`build/`.
+
+`scripts/test.sh` makes its own build, ad hoc unless these variables are in
+its environment too, so test a signed build with `scripts/test.sh --no-build`.
+It stops rather than build over a signed one.
+
+Give every build you ship its own `CDP_VERSION` (top of `bin/cdp`). Each
+launcher carries its own copy of `cdp` and keeps running it until the app's
+setup step rebuilds the launchers. That step runs when a user opens the
+Claude Profiles window on a new version, and an unchanged version skips it.
+If you install the app for users without them opening it, run this once for
+each user, as that user:
+
+```sh
+"/Applications/Claude Profiles.app/Contents/Resources/cdp" setup
+```
+
+The launchers are compiled on each user's Mac and stay ad hoc signed whatever
+the app is signed with. `cdp gui` signs the app it builds with
+`CDP_SIGN_IDENTITY` too, when that is set.
 
 ## Acknowledgments
 
