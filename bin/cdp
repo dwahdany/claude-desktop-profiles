@@ -10,9 +10,11 @@
 #      dialog that lists every profile (plus your default install) and can
 #      also add and remove profiles without touching the terminal.
 #
-# Profiles are discovered by convention, not by a registry file: any folder
-# matching ~/Library/Application Support/Claude-<Name> is a profile. Delete
-# the folder and the launcher app, and the profile is gone.
+# Profiles are discovered by convention, not by a registry file: a folder
+# ~/Library/Application Support/Claude-<Name> is a profile, where <Name> is
+# spelled the way cdp spells it (words of letters and digits, capitalised,
+# single spaces). Delete the folder and the launcher app, and the profile is
+# gone.
 #
 # The chooser bundles a copy of this script in its Resources and shells out
 # to it for add/remove, so GUI and CLI share one implementation.
@@ -25,11 +27,16 @@ set -euo pipefail
 # (FUNCTION_ARGZERO), which would break the self-copy into the chooser bundle.
 SCRIPT_PATH="${0:A}"
 
-# Every build that ships needs its own version string. cmd_setup skips its work
-# when "<version> <script path>" matches the stamp of the last setup, so a
-# different build under an unchanged version would leave the launchers, the
-# watchdog and the cached helper on the previous build's code.
+# Every build that ships needs its own version string. `cdp setup --if-needed`
+# (what the app runs when its window opens) skips its work when
+# "<version> <script path>" matches the stamp of the last setup. Each launcher
+# carries its own copy of this script, so a different build under an unchanged
+# version would leave the launchers on the previous build's code.
 CDP_VERSION="0.4.3.1"
+
+# zsh always sets USERNAME; USER comes from the environment and can be missing
+# in a stripped one.
+: ${USER:=$USERNAME}
 
 APP_SUPPORT="$HOME/Library/Application Support"
 LAUNCHER_DIR="$HOME/Applications"
@@ -61,10 +68,13 @@ typeset -A HUES=(
 
 # ---- helpers ---------------------------------------------------------------
 
-err()  { print -u2 -- "✗ $*"; exit 1 }
-ok()   { print -- "✓ $*" }
-info() { print -- "ℹ $*" }
-warn() { print -u2 -- "⚠ $*" }
+# -r: messages quote names that come from folder names and from other
+# processes' command lines, and print would otherwise act on a backslash
+# sequence in them (a line break, \c to cut the message short).
+err()  { print -r -u2 -- "✗ $*"; exit 1 }
+ok()   { print -r -- "✓ $*" }
+info() { print -r -- "ℹ $*" }
+warn() { print -r -u2 -- "⚠ $*" }
 
 find_claude_app() {
   local c
@@ -98,7 +108,10 @@ profile_display() {
   display=$(displayify "$(slugify "$raw")")
   [[ -n "$display" ]] || err "Name must contain at least one letter or digit."
   if [[ -d "$APP_SUPPORT/Claude-$raw" && ! "$APP_SUPPORT/Claude-$raw" -ef "$APP_SUPPORT/Claude-$display" ]]; then
-    err "'$raw' is not a profile cdp created: its folder is not named the way cdp names profiles, and the name resolves to the profile '$display' instead. Nothing was changed. Folder: $APP_SUPPORT/Claude-$raw"
+    local other=""
+    [[ -d "$APP_SUPPORT/Claude-$display" ]] &&
+      other=" cdp reads this name as the profile '$display', a different folder; use that spelling if it is the one you mean."
+    err "The folder for '${(V)raw}' is not named the way cdp names profiles, so cdp does not manage it.$other Nothing was changed. Folder: $APP_SUPPORT/Claude-${(V)raw}"
   fi
   print -r -- "$display"
 }
@@ -385,10 +398,11 @@ has_custom_icon() {
 # Only this user's processes (no -a), and only this exact folder: the
 # argument must end there or be followed by another flag. A bare substring
 # match also hit a longer folder sharing the prefix, so launching "Work"
-# while "Work Two" ran focused the other account's window.
+# while "Work Two" ran focused the other account's window. -ww: never a
+# command line cut to a terminal's width.
 instance_pid() {
   local line pid rest arg="--user-data-dir=$1"
-  ps -xo pid=,command= 2>/dev/null | grep -F -- "$arg" | grep -F "/Contents/MacOS/Claude" | grep -v Helper | grep -v grep | while IFS= read -r line; do
+  ps -xww -o pid=,command= 2>/dev/null | grep -F -- "$arg" | grep -F "/Contents/MacOS/Claude" | grep -v Helper | grep -v grep | while IFS= read -r line; do
     rest="${line#*"$arg"}"
     rest="${rest%"${rest##*[![:space:]]}"}"
     [[ -z "$rest" || "$rest" == " -"* ]] || continue
@@ -453,12 +467,16 @@ launch_clone() {
 # What comes out of here is handed to `kill`, so a line only counts when it
 # is one of this user's processes (no -a), its pid column is a plain number,
 # and its command IS a clone's main binary rather than merely mentioning
-# one. Command lines are written by the processes themselves: the pid is
-# never taken from that text, and -r keeps print from turning a backslash
-# sequence in it into an extra record.
+# one, with no arguments or with flags only: a stray is started with no
+# arguments at all, and anything else run from that binary (a script, a
+# differently named executable beside it) is not ours to stop. Command lines
+# are written by the processes themselves: the pid is never taken from that
+# text, and -r keeps print from turning a backslash sequence in it into an
+# extra record. -ww: a line cut to a terminal's width could lose the
+# --user-data-dir that marks a clone as correctly homed.
 stray_pids() {
   local line pid cmd display exe
-  ps -xo pid=,command= 2>/dev/null | grep -F -- "$CLONES_DIR/Claude " | grep -vF -- "--user-data-dir=" | while IFS= read -r line; do
+  ps -xww -o pid=,command= 2>/dev/null | grep -F -- "$CLONES_DIR/Claude " | grep -vF -- "--user-data-dir=" | while IFS= read -r line; do
     # ps right-aligns the pid column: drop the padding, then split.
     line="${line#"${line%%[![:space:]]*}"}"
     pid="${line%%[[:space:]]*}"
@@ -471,7 +489,7 @@ stray_pids() {
     # A slash means the binary sits deeper in the bundle: a helper process.
     [[ -n "$display" && "$display" != */* ]] || continue
     exe="$CLONES_DIR/Claude $display.app/Contents/MacOS/Claude"
-    [[ "$cmd" == "$exe" || "$cmd" == "$exe "* ]] || continue
+    [[ "$cmd" == "$exe" || "$cmd" == "$exe -"* ]] || continue
     print -r -- "$pid"$'\t'"$display"
   done || true
 }
@@ -482,8 +500,9 @@ adopt_strays() {
   local entry pid display i
   stray_pids | while IFS=$'\t' read -r pid display; do
     # One ordinary process only: 0 and negative ids address whole process
-    # groups, and -1 every process this user owns.
-    [[ "$pid" == <-> ]] && (( pid > 1 )) || continue
+    # groups, -1 every process this user owns, and kill wraps a number too
+    # large for a pid around to one of those.
+    [[ "$pid" == <2-9999999> ]] || continue
     info "Clone '$display' is running without its profile (post-update relaunch?) — re-homing."
     kill -TERM "$pid" 2>/dev/null || continue
     for i in {1..30}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
@@ -611,6 +630,12 @@ rebuild_chooser_unless_nested() {
 # Dock tile wears the profile color and owns the window) or focuses the
 # already-running instance, then the applet exits. stderr stays attached so
 # a failed launch surfaces as an alert instead of dying silently.
+#
+# The launcher asks for its profile by display name, the spelling of the
+# profile's folder, not by slug: a slug can also be the name of some other
+# folder ("client-acme" next to "Client Acme"), and cdp refuses a name that
+# is ambiguous in that way. Both come from slugify/displayify, so only
+# letters, digits, hyphens and spaces reach the AppleScript source.
 build_launcher() {
   local slug="$1" display="$2" color="$3" claude_app="$4" tmp
   local app_path="$LAUNCHER_DIR/Claude $display.app"
@@ -618,7 +643,7 @@ build_launcher() {
   cat > "$tmp/launcher.applescript" <<EOF
 on run
 	try
-		do shell script "/bin/zsh " & quoted form of (POSIX path of (path to me) & "Contents/Resources/cdp") & " launch " & quoted form of "$slug" & " > /dev/null"
+		do shell script "/bin/zsh " & quoted form of (POSIX path of (path to me) & "Contents/Resources/cdp") & " launch " & quoted form of "$display" & " > /dev/null"
 	on error msg
 		display alert "Could not launch Claude $display" message msg as critical
 	end try
@@ -644,23 +669,33 @@ bundle_cdp() {
 
 # Every installed piece carries a copy of (or runs) this script: the manager
 # app, each profile launcher, the watchdog process and the helper. Installing
-# the manager brings all of them to this version so an update never leaves
-# an old copy behind. Launchers whose profile has no launcher (removed with
-# --keep-data) stay removed.
+# the manager brings all of them to this version, so an update does not
+# leave an old copy behind. Profiles without a launcher (removed with
+# --keep-data) stay without one, and a Claude-* folder that is not a cdp
+# profile is left alone.
 sync_install() {
-  local claude_app d display m
+  local claude_app d name display m
   claude_app=$(find_claude_app)
   # This version takes over: a helper cached by an earlier install would
   # otherwise stay in use for as long as its file is newer than this script.
-  # Only when the manager app ships one to replace it with.
+  # Only when the manager app ships one to replace it with. A refresh, not
+  # something the rest of the setup depends on.
   m=$(manager_app) && [[ -x "$m/Contents/Resources/$HELPER_NAME.app/Contents/MacOS/$HELPER_NAME" ]] &&
-    rm -rf "$CACHE_DIR/$HELPER_NAME.app"
+    rm -rf "$CACHE_DIR/$HELPER_NAME.app" || true
   for d in "$APP_SUPPORT"/Claude-*(N/); do
-    display="${${d:t}#Claude-}"
-    # Only folders named the way cdp names profiles. The name is written
-    # into the launcher's AppleScript source, and a Claude-* folder made by
-    # anything else can carry quotes or line breaks.
-    [[ "$display" == "$(displayify "$(slugify "$display")")" ]] || continue
+    name="${${d:t}#Claude-}"
+    # Only folders that ARE the profile their name resolves to, and only the
+    # cdp spelling of that name goes into the launcher's AppleScript source:
+    # a Claude-* folder made by anything else can carry quotes or line
+    # breaks. -ef rather than a string comparison, so a folder that differs
+    # from cdp's spelling in letter case alone still counts on a
+    # case-insensitive volume, where it is the same folder.
+    display=$(displayify "$(slugify "$name")")
+    if [[ -z "$display" || ! "$d" -ef "$APP_SUPPORT/Claude-$display" ]]; then
+      [[ -d "$LAUNCHER_DIR/Claude $name.app" ]] &&
+        warn "Launcher not updated: the folder '${(V)name}' is not named the way cdp names profiles."
+      continue
+    fi
     [[ -d "$LAUNCHER_DIR/Claude $display.app" ]] || continue
     build_launcher "$(slugify "$display")" "$display" "$(color_of_profile "$d")" "$claude_app"
   done
@@ -940,7 +975,7 @@ cmd_watchdog() {
       fi
       local s
       s=$(stray_pids)
-      [[ -n "$s" ]] && print -- "Strays:"$'\n'"$s" || info "No stray clones."
+      [[ -n "$s" ]] && print -r -- "Strays:"$'\n'"$s" || info "No stray clones."
       ;;
     *) err "Usage: cdp watchdog [install|uninstall|status]" ;;
   esac
@@ -977,8 +1012,9 @@ cmd_color() {
 }
 
 # Builds the SwiftUI manager app at $1 from a repo checkout: the GUI, a copy
-# of this script and the prebuilt helper, ad-hoc signed. Used by `cdp gui`
-# and by scripts/build.sh for the release.
+# of this script and the prebuilt helper, signed ad hoc or with
+# CDP_SIGN_IDENTITY. Used by `cdp gui` and by scripts/build.sh for the
+# release.
 build_manager_app() {
   local bundle="$1"
   command -v swiftc >/dev/null 2>&1 ||

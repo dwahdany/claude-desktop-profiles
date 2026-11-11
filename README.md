@@ -28,7 +28,10 @@ password or Touch ID.
 
 <img src="docs/images/open-anyway-confirm.png" width="300" alt="macOS dialog: Open “Claude Profiles”? with the Open Anyway button">
 
-You do this once per version; from then on it opens like any other app.
+You do this once per version; from then on it opens like any other app. A
+build that was signed and notarized (see
+[Signed and notarized builds](#signed-and-notarized-builds)) opens without
+this step.
 
 > **Prefer the Terminal?** This does the same as step 3:
 > ```sh
@@ -99,7 +102,7 @@ The window, the launchers and the CLI all run the same `cdp` script.
 
 ## Data and privacy
 
-- No telemetry, no network calls. About 1,700 lines of shell and Swift you can
+- No telemetry, no network calls. About 1,800 lines of shell and Swift you can
   read in one sitting.
 - A profile is a folder: `~/Library/Application Support/Claude-<Name>`. Its
   Claude Code config lives in `<profile>/claude-config`.
@@ -226,9 +229,11 @@ AppleScript picker without a Swift toolchain) and links `cdp` onto your PATH.
 ## Tests
 
 ```sh
-scripts/build.sh   # build/Claude Profiles.app and build/Claude-Profiles.zip (universal)
-scripts/test.sh    # builds, checks the bundle, then runs the first-launch setup
-                   # of a quarantined copy in a throwaway HOME
+scripts/build.sh           # build/Claude Profiles.app and build/Claude-Profiles.zip (universal)
+scripts/test.sh            # builds, checks the bundle, then runs the first-launch setup
+                           # of a quarantined copy in a throwaway HOME
+zsh scripts/test-unit.zsh  # the name, process-matching and signing logic alone;
+                           # needs no Mac, and scripts/test.sh runs it too
 ```
 
 The tests never touch your real `~/Applications`, profiles or watchdog.
@@ -248,15 +253,30 @@ scripts/build.sh
   and its helper are signed with it, with the hardened runtime and a secure
   timestamp.
 - `CDP_NOTARY_PROFILE`: a keychain profile created with
-  `xcrun notarytool store-credentials`. The zip is notarized, the ticket is
-  stapled to the app, and the zip is made again from the stapled app.
+  `xcrun notarytool store-credentials`. The app is notarized and the ticket
+  stapled to it before the zip is made. It needs `CDP_SIGN_IDENTITY`.
 
-Give every build you ship its own `CDP_VERSION` (top of `bin/cdp`): the first
-launch of a new version is what moves the launchers, the watchdog and the
-helper over to it, and an unchanged version skips that step.
+With `CDP_SIGN_IDENTITY` alone the build is signed and not notarized. The last
+line of the build's output says which of the three it was. If the build fails,
+or the notary service does not accept it, no zip is left in `build/`.
+
+`scripts/test.sh` makes its own ad hoc build, so test a signed build with
+`scripts/test.sh --no-build`. It stops rather than build over a signed one.
+
+Give every build you ship its own `CDP_VERSION` (top of `bin/cdp`). Each
+launcher carries its own copy of `cdp` and keeps running it until the app's
+setup step rebuilds the launchers. That step runs when a user opens the
+Claude Profiles window on a new version, and an unchanged version skips it.
+If you install the app for users without them opening it, run this once for
+each user, as that user:
+
+```sh
+"/Applications/Claude Profiles.app/Contents/Resources/cdp" setup
+```
 
 The launchers are compiled on each user's Mac and stay ad hoc signed whatever
-the app is signed with.
+the app is signed with. `cdp gui` signs the app it builds with
+`CDP_SIGN_IDENTITY` too, when that is set.
 
 ## Acknowledgments
 

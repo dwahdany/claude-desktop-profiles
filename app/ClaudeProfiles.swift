@@ -141,8 +141,9 @@ final class ProfileStore: ObservableObject {
     }
 
     func refreshRunning() {
-        // -x without -a: this user's processes only, same as cdp's own check.
-        guard let out = try? runTool("/bin/ps", ["-xo", "command"]) else { return }
+        // -x without -a: this user's processes only; -ww: full command lines.
+        // Same as cdp's own check.
+        guard let out = try? runTool("/bin/ps", ["-xww", "-o", "command"]) else { return }
         var found = Set<String>()
         for lineSub in out.split(separator: "\n") {
             let line = String(lineSub)
