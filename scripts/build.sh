@@ -12,14 +12,21 @@
 #                       The app is then notarized and the ticket stapled to
 #                       it before the zip is made.
 #
-# The zip exists only after a run that finished: a build that fails, or is
-# not accepted by the notary service, leaves nothing at that path.
+# The zip exists only after a run that finished: a run that is refused, a
+# build that fails or one the notary service does not accept leaves nothing
+# at that path, not even the zip of an earlier run.
 set -eu
 cd "$(dirname "$0")/.."
 
 APP="build/Claude Profiles.app"
 ZIP="build/Claude-Profiles.zip"
+# Working files. The release zip is written under another name and moved
+# into place as the last step, so a run cut short leaves no partial one.
 SUBMISSION="build/notary-submission.zip"
+PARTIAL="$ZIP.partial"
+
+rm -f "$ZIP" "$SUBMISSION" "$PARTIAL"
+trap 'rm -f "$SUBMISSION" "$PARTIAL"' EXIT
 
 # bin/cdp reads an empty identity and "-" as ad hoc; so does this script.
 IDENTITY="${CDP_SIGN_IDENTITY:-}"
@@ -31,17 +38,15 @@ if [ -n "$PROFILE" ] && [ -z "$IDENTITY" ]; then
     exit 1
 fi
 
-rm -f "$ZIP" "$SUBMISSION"
 CDP_ARCHS="arm64 x86_64" bin/cdp build "$APP"
 
 if [ -n "$PROFILE" ]; then
-    trap 'rm -f "$SUBMISSION"' EXIT
     ditto -c -k --keepParent "$APP" "$SUBMISSION"
     xcrun notarytool submit "$SUBMISSION" --keychain-profile "$PROFILE" --wait
     # The gate: there is a ticket to staple only when the submission was
     # accepted, whatever notarytool's own exit status was.
     xcrun stapler staple "$APP" || {
-        echo "No notarization ticket for $APP: the submission above was not accepted." >&2
+        echo "Could not staple a notarization ticket to $APP: the submission above was not accepted, or the ticket could not be fetched." >&2
         echo "Details: xcrun notarytool log <submission id> --keychain-profile \"$PROFILE\"" >&2
         exit 1
     }
@@ -52,5 +57,6 @@ else
     SIGNED="ad hoc signed"
 fi
 
-ditto -c -k --keepParent "$APP" "$ZIP"
+ditto -c -k --keepParent "$APP" "$PARTIAL"
+mv "$PARTIAL" "$ZIP"
 echo "Built $APP and $ZIP ($(bin/cdp version), $SIGNED)"

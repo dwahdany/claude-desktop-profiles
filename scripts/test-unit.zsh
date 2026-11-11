@@ -57,8 +57,9 @@ alias_of() { [[ -e "$2" ]] || ln -s "$1" "$2" }
 # Recorders, redefined after every `source "$FUNCS"`.
 PS_LINES=()
 LOG="$SANDBOX/log"
+PS_ARGS="$SANDBOX/ps.args"
 stubs() {
-  ps() { print -rl -- $PS_LINES }
+  ps() { print -r -- "$*" > "$PS_ARGS"; print -rl -- $PS_LINES }
   kill() { print -r -- "kill $*" >> "$LOG"; [[ "$1" == "-0" ]] && return 1; return 0 }
   sleep() { : }
   find_claude_app() { print -r -- "/Applications/Claude.app" }
@@ -91,8 +92,17 @@ out=$(profile_display 'Solo_Odd' 2>&1) && rc=0 || rc=$?
 eq "a folder not spelled cdp's way is refused" "$rc" "1"
 [[ "$out" != *"the profile '"* ]] && eq "  no other profile is named when there is none" yes yes ||
   eq "  no other profile is named when there is none" "$out" "<no mention>"
-out=$(profile_display 'x\c' 2>&1) && rc=0 || rc=$?
 eq "an unknown name still resolves; the caller reports not found" "$(profile_display 'nope' 2>&1)" "Nope"
+mkdir -p "$AS/Claude-x\c_y" "$AS/Claude-A"$'\n'"B_c" "$AS/Claude-Büro_Alt"
+out=$(profile_display 'x\c_y' 2>&1) && rc=0 || rc=$?
+[[ "$out" == *"Folder: $AS/Claude-x\c_y" ]] && eq "a backslash sequence in a name does not cut the message short" yes yes ||
+  eq "a backslash sequence in a name does not cut the message short" "$out" "…Folder: $AS/Claude-x\c_y"
+out=$(profile_display $'A\nB_c' 2>&1) && rc=0 || rc=$?
+has "a line break in a name is shown as a placeholder" "$out" "'A?B_c'"
+lines=("${(@f)out}")
+eq "  and the message stays on one line" "${#lines}" "1"
+out=$(LC_ALL=C profile_display 'Büro_Alt' 2>&1) && rc=0 || rc=$?
+has "other characters in a name are shown as they are, in any locale" "$out" "'Büro_Alt'"
 out=$(profile_display '日本語' 2>&1) && rc=0 || rc=$?
 eq "a name with no letters or digits is refused" "$rc" "1"
 alias_of "Claude-Work" "$AS/Claude-work"
@@ -137,13 +147,16 @@ PS_LINES=(
 )
 want="812"$'\t'"Work"$'\n'"48213"$'\t'"Client Acme"$'\n'"900"$'\t'"2024"$'\n'"901"$'\t'"Flagged"
 eq "only a clone's main binary, bare or with flags, under its own pid" "$(stray_pids)" "$want"
+eq "  from this user's processes, with whole command lines" "$(<"$PS_ARGS")" "-xww -o pid=,command="
 # A process chooses its own argv[0]; all it can do with it is name itself.
 PS_LINES=("  777 $C/Claude X\\n-1\\tWork.app/Contents/MacOS/Claude")
 eq "escapes in a forged name make one record, with the process's own pid" "$(vis "$(stray_pids)")" "777<TAB>X\\n-1\\tWork"
 PS_LINES=("  778 $C/Claude A	-1.app/Contents/MacOS/Claude")   # a real TAB in the name
 eq "a TAB in a forged name cannot move the pid field" "$(vis "$(stray_pids)")" "778<TAB>A<TAB>-1"
 PS_LINES=()
-eq "no processes: empty, and the script carries on" "$(stray_pids)" ""
+eq "no processes: empty" "$(stray_pids)" ""
+stray_pids >/dev/null && rc=0 || rc=$?
+eq "  and not a failure that would end the script" "$rc" "0"
 
 print -r -- "---- which pids are signalled"
 launch_profile() { print -r -- "launch $1" >> "$LOG" }
@@ -177,6 +190,7 @@ PS_LINES=(
 )
 eq "Work is not running when only Work Two is"    "$(instance_pid "$W")"  ""
 eq "Work Two: the main process, not its helper"   "$(instance_pid "$W2")" "640"
+eq "  from this user's processes, with whole command lines" "$(<"$PS_ARGS")" "-xww -o pid=,command="
 PS_LINES+=("48000 $C/Claude Work.app/Contents/MacOS/Claude --user-data-dir=$W")
 eq "Work is found once it runs"                   "$(instance_pid "$W")"  "48000"
 eq "Work Two keeps its own pid"                   "$(instance_pid "$W2")" "640"
@@ -190,7 +204,9 @@ PS_LINES=(
 )
 eq "the first match only"                         "$(instance_pid "$W")"  "79"
 PS_LINES=()
-eq "nothing running: empty, and the script carries on" "$(instance_pid "$W")" ""
+eq "nothing running: empty" "$(instance_pid "$W")" ""
+instance_pid "$W" >/dev/null && rc=0 || rc=$?
+eq "  and not a failure that would end the script" "$rc" "0"
 
 print -r -- "---- which launchers an update rebuilds"
 evil='Evil" & (do shell script "id") & "'
@@ -210,7 +226,8 @@ cached="$CACHE_DIR/$HELPER_NAME.app"
 mkdir -p "$cached/Contents/MacOS"; : > "$cached/Contents/MacOS/stale"
 : > "$SANDBOX/built"
 warned=$(sync_install 2>&1 >/dev/null)
-eq "profiles with a launcher, in cdp's spelling; nothing else" "$(<"$SANDBOX/built")" "build [work] [Work]"$'\n'"build [qa] [Qa]"
+# Sorted here: the order sync_install walks the folders in follows the locale.
+eq "profiles with a launcher, in cdp's spelling; nothing else" "$(LC_ALL=C sort "$SANDBOX/built")" "build [qa] [Qa]"$'\n'"build [work] [Work]"
 has "a skipped folder that has a launcher is reported" "$warned" "Launcher not updated: the folder 'Work_Old'"
 eq "no manager app with a helper: the cached helper is kept" "$(there "$cached/Contents/MacOS/stale")" "yes"
 mgr="$SANDBOX/Claude Profiles.app"

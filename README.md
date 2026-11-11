@@ -257,11 +257,13 @@ scripts/build.sh
   stapled to it before the zip is made. It needs `CDP_SIGN_IDENTITY`.
 
 With `CDP_SIGN_IDENTITY` alone the build is signed and not notarized. The last
-line of the build's output says which of the three it was. If the build fails,
-or the notary service does not accept it, no zip is left in `build/`.
+line of the build's output says which of the three it was. If the build is
+refused or fails, or the notary service does not accept it, no zip is left in
+`build/`.
 
-`scripts/test.sh` makes its own ad hoc build, so test a signed build with
-`scripts/test.sh --no-build`. It stops rather than build over a signed one.
+`scripts/test.sh` makes its own build, ad hoc unless these variables are in
+its environment too, so test a signed build with `scripts/test.sh --no-build`.
+It stops rather than build over a signed one.
 
 Give every build you ship its own `CDP_VERSION` (top of `bin/cdp`). Each
 launcher carries its own copy of `cdp` and keeps running it until the app's

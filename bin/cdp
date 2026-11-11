@@ -32,7 +32,7 @@ SCRIPT_PATH="${0:A}"
 # "<version> <script path>" matches the stamp of the last setup. Each launcher
 # carries its own copy of this script, so a different build under an unchanged
 # version would leave the launchers on the previous build's code.
-CDP_VERSION="0.4.3.1"
+CDP_VERSION="0.4.3.2"
 
 # zsh always sets USERNAME; USER comes from the environment and can be missing
 # in a stripped one.
@@ -76,6 +76,12 @@ ok()   { print -r -- "✓ $*" }
 info() { print -r -- "ℹ $*" }
 warn() { print -r -u2 -- "⚠ $*" }
 
+# A name as a message can show it: a line break or an escape character in a
+# folder name would otherwise break up the message or act on the terminal.
+# Only ASCII control characters are replaced, so any other name stays
+# readable whatever locale cdp runs in.
+shown() { print -r -- "${1//[$'\x01'-$'\x1f'$'\x7f']/?}" }
+
 find_claude_app() {
   local c
   for c in "/Applications/Claude.app" "$HOME/Applications/Claude.app"; do
@@ -111,7 +117,7 @@ profile_display() {
     local other=""
     [[ -d "$APP_SUPPORT/Claude-$display" ]] &&
       other=" cdp reads this name as the profile '$display', a different folder; use that spelling if it is the one you mean."
-    err "The folder for '${(V)raw}' is not named the way cdp names profiles, so cdp does not manage it.$other Nothing was changed. Folder: $APP_SUPPORT/Claude-${(V)raw}"
+    err "The folder for '$(shown "$raw")' is not named the way cdp names profiles, so cdp does not manage it.$other Nothing was changed. Folder: $APP_SUPPORT/Claude-$(shown "$raw")"
   fi
   print -r -- "$display"
 }
@@ -467,9 +473,10 @@ launch_clone() {
 # What comes out of here is handed to `kill`, so a line only counts when it
 # is one of this user's processes (no -a), its pid column is a plain number,
 # and its command IS a clone's main binary rather than merely mentioning
-# one, with no arguments or with flags only: a stray is started with no
-# arguments at all, and anything else run from that binary (a script, a
-# differently named executable beside it) is not ours to stop. Command lines
+# one, with no arguments or with a flag as the first: a stray is started
+# with no arguments at all, and a line that goes on with anything else (a
+# script to run, the rest of a differently named executable beside it) is
+# not ours to stop. Command lines
 # are written by the processes themselves: the pid is never taken from that
 # text, and -r keeps print from turning a backslash sequence in it into an
 # extra record. -ww: a line cut to a terminal's width could lose the
@@ -692,8 +699,10 @@ sync_install() {
     # case-insensitive volume, where it is the same folder.
     display=$(displayify "$(slugify "$name")")
     if [[ -z "$display" || ! "$d" -ef "$APP_SUPPORT/Claude-$display" ]]; then
+      # Seen when setup is run from a terminal; the app shows a setup's
+      # messages only when the setup fails.
       [[ -d "$LAUNCHER_DIR/Claude $name.app" ]] &&
-        warn "Launcher not updated: the folder '${(V)name}' is not named the way cdp names profiles."
+        warn "Launcher not updated: the folder '$(shown "$name")' is not named the way cdp names profiles."
       continue
     fi
     [[ -d "$LAUNCHER_DIR/Claude $display.app" ]] || continue

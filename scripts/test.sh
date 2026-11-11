@@ -7,7 +7,8 @@
 #
 # The build it makes is ad hoc unless CDP_SIGN_IDENTITY is in the environment.
 # To test a signed or notarized build from scripts/build.sh, pass --no-build;
-# without it this script stops rather than build over one.
+# without it this script stops rather than build over one, whatever is in the
+# environment.
 set -uo pipefail
 cd "${0:A:h:h}"
 
@@ -34,17 +35,20 @@ team() {
   t=$(codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p')
   [[ "$t" == "not set" ]] || print -r -- "$t"
 }
-runtime() { codesign -dv "$1" 2>&1 | grep -q 'flags=.*runtime' }
+# Not grep -q: it stops reading at the match, and under pipefail a codesign
+# still writing would turn that into a failure.
+runtime() { codesign -dv "$1" 2>&1 | grep 'flags=.*runtime' >/dev/null }
 
 check "cdp parses" zsh -n bin/cdp
 check "unit checks pass (zsh scripts/test-unit.zsh)" zsh scripts/test-unit.zsh
 if [[ "${1:-}" != "--no-build" ]]; then
-  # The build below is ad hoc unless the signing variables are in this shell's
-  # environment too, and it would take the place of the build that is there.
-  if [[ -z "${CDP_SIGN_IDENTITY:-}" && -n "$(team "$APP")" ]]; then
-    print -- "build/ holds a build signed by team $(team "$APP"), and a rebuild here would be ad hoc."
+  # The build below takes the place of the one that is there, and it is only
+  # as signed and notarized as this shell's environment makes it. A signed
+  # build is never replaced unasked.
+  if [[ -n "$(team "$APP")" ]]; then
+    print -- "build/ holds a build signed by team $(team "$APP"), which a build made here would replace."
     print -- "Test that build as it is:  scripts/test.sh --no-build"
-    print -- "Or remove build/ first to test a fresh ad hoc build."
+    print -- "Or remove build/ first to have this script make and test its own."
     exit 1
   fi
   scripts/build.sh >/dev/null 2>&1 || { print -- "FAIL build"; exit 1 }
