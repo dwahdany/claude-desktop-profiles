@@ -31,8 +31,9 @@ SCRIPT_PATH="${0:A}"
 # (what the app runs when its window opens) skips its work when
 # "<version> <script path>" matches the stamp of the last setup. Each launcher
 # carries its own copy of this script, so a different build under an unchanged
-# version would leave the launchers on the previous build's code.
-CDP_VERSION="0.4.3.2"
+# version would leave the launchers on the previous build's code. Three
+# numbers: it is also the app's bundle version, and macOS reads no more.
+CDP_VERSION="0.4.4"
 
 # zsh always sets USERNAME; USER comes from the environment and can be missing
 # in a stripped one.
